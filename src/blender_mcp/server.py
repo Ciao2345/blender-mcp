@@ -1,5 +1,5 @@
 # blender_mcp_server.py
-from mcp.server.fastmcp import FastMCP, Context, Image
+from fastmcp import FastMCP, Context, Image  # Importazione corretta dal modulo mcp-server
 import socket
 import json
 import asyncio
@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 import base64
 from urllib.parse import urlparse
+import tempfile
+import websockets
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -691,6 +693,82 @@ def import_generated_asset(
     except Exception as e:
         logger.error(f"Error generating Hyper3D task: {str(e)}")
         return f"Error generating Hyper3D task: {str(e)}"
+
+async def notify_unreal(message: Dict[str, Any]):
+    """Send a notification to Unreal's MCP endpoint"""
+    try:
+        async with websockets.connect('ws://localhost:9877/mcp/unreal') as websocket:
+            await websocket.send(json.dumps(message))
+            logger.info(f"Notified Unreal: {message}")
+    except Exception as e:
+        logger.error(f"Failed to notify Unreal: {str(e)}")
+
+@mcp.tool()
+def export_to_unreal(ctx: Context, object_name: str) -> str:
+    """
+    Export a Blender object to Unreal Engine
+    
+    Parameters:
+    - object_name: Name of the object to export
+    """
+    try:
+        blender = get_blender_connection()
+        
+        # Get object info including transforms and materials
+        result = blender.send_command("get_object_info", {"name": object_name})
+        
+        if "error" in result:
+            return f"Error: {result['error']}"
+            
+        # Export object to temp file
+        temp_dir = tempfile.mkdtemp()
+        export_path = os.path.join(temp_dir, f"{object_name}.glb")
+        
+        result = blender.send_command("export_asset", {
+            "object_name": object_name,
+            "file_path": export_path,
+            "format": "glb"
+        })
+        
+        if "error" in result:
+            return f"Error exporting asset: {result['error']}"
+            
+        # Get material info if object has materials
+        material_data = {}
+        if result.get("has_materials", False):
+            material_result = blender.send_command("get_material_info", {
+                "object_name": object_name
+            })
+            if "error" not in material_result:
+                material_data = material_result
+        
+        # Build asset data for Unreal
+        asset_data = {
+            "mesh_data": {
+                "name": object_name,
+                "file_path": export_path,
+                "location": result["location"],
+                "rotation": result["rotation"],
+                "scale": result["scale"]
+            }
+        }
+        
+        if material_data:
+            asset_data["material_data"] = material_data
+            
+        # Notify Unreal about the new asset
+        notification = {
+            "type": "asset_available",
+            "data": asset_data
+        }
+        
+        asyncio.create_task(notify_unreal(notification))
+            
+        return json.dumps(asset_data)
+        
+    except Exception as e:
+        logger.error(f"Error exporting to Unreal: {str(e)}")
+        return f"Error exporting to Unreal: {str(e)}"
 
 @mcp.prompt()
 def asset_creation_strategy() -> str:

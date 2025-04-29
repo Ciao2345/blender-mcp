@@ -200,6 +200,8 @@ class BlenderMCPServer:
             "execute_code": self.execute_code,
             "get_polyhaven_status": self.get_polyhaven_status,
             "get_hyper3d_status": self.get_hyper3d_status,
+            "export_asset": self.export_asset,
+            "get_material_info": self.get_material_info,
         }
         
         # Add Polyhaven handlers only if enabled
@@ -1372,6 +1374,104 @@ class BlenderMCPServer:
         except Exception as e:
             return {"succeed": False, "error": str(e)}
     #endregion
+
+    def export_asset(self, object_name: str, file_path: str, format: str = "glb"):
+        """Export an object to a file"""
+        try:
+            # Get the object
+            obj = bpy.data.objects.get(object_name)
+            if not obj:
+                return {"error": f"Object not found: {object_name}"}
+
+            # Select only this object
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+
+            # Export based on format
+            if format.lower() == "glb":
+                bpy.ops.export_scene.gltf(
+                    filepath=file_path,
+                    use_selection=True,
+                    export_format='GLB',
+                    export_texcoords=True,
+                    export_normals=True,
+                    export_materials=True
+                )
+            else:
+                return {"error": f"Unsupported export format: {format}"}
+
+            # Check if object has materials
+            has_materials = len(obj.material_slots) > 0
+                
+            return {
+                "success": True,
+                "file_path": file_path,
+                "has_materials": has_materials
+            }
+
+        except Exception as e:
+            print(f"Error in export_asset: {str(e)}")
+            traceback.print_exc()
+            return {"error": f"Failed to export asset: {str(e)}"}
+
+    def get_material_info(self, object_name: str):
+        """Get material information for an object"""
+        try:
+            obj = bpy.data.objects.get(object_name)
+            if not obj:
+                return {"error": f"Object not found: {object_name}"}
+
+            # Get material data
+            materials = {}
+            maps_dir = tempfile.mkdtemp()
+
+            for slot in obj.material_slots:
+                if not slot.material:
+                    continue
+
+                mat = slot.material
+                if not mat.use_nodes:
+                    continue
+
+                material_data = {
+                    "name": mat.name,
+                    "maps": {}
+                }
+
+                # Find texture nodes and export textures
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image:
+                        map_type = "color"  # Default type
+                        
+                        # Try to determine map type from connections
+                        for link in node.outputs["Color"].links:
+                            if link.to_node.type == 'BSDF_PRINCIPLED':
+                                if link.to_socket.name == "Base Color":
+                                    map_type = "color"
+                                elif link.to_socket.name == "Metallic":
+                                    map_type = "metallic"
+                                elif link.to_socket.name == "Roughness":
+                                    map_type = "roughness"
+                            elif link.to_node.type == 'NORMAL_MAP':
+                                map_type = "normal"
+
+                        # Export texture to file
+                        tex_path = os.path.join(maps_dir, f"{mat.name}_{map_type}.png")
+                        node.image.save_render(tex_path)
+                        material_data["maps"][map_type] = tex_path
+
+                materials[mat.name] = material_data
+
+            return {
+                "success": True,
+                "materials": materials
+            }
+
+        except Exception as e:
+            print(f"Error in get_material_info: {str(e)}")
+            traceback.print_exc() 
+            return {"error": f"Failed to get material info: {str(e)}"}
 
 # Blender UI Panel
 class BLENDERMCP_PT_Panel(bpy.types.Panel):
